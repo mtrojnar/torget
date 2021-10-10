@@ -234,10 +234,12 @@ func (s *State) Fetch(src string) int {
 
 	// spawn initial fetchers
 	go s.progress()
-	for id := 0; id < s.circuits; id++ {
-		go s.fetchChunk(id)
-		time.Sleep(499 * time.Millisecond) // be gentle to the local tor daemon
-	}
+	go func() {
+		for id := 0; id < s.circuits; id++ {
+			go s.fetchChunk(id)
+			time.Sleep(499 * time.Millisecond) // be gentle to the local tor daemon
+		}
+	}()
 
 	// spawn additional fetchers as needed
 	for {
