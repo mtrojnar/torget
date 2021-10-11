@@ -37,20 +37,24 @@ type chunk struct {
 }
 
 type State struct {
-	src      string
-	dst      string
-	total    int64
-	circuits int
-	chunks   []chunk
-	done     chan int
-	mutex    sync.Mutex
+	src             string
+	dst             string
+	total           int64
+	circuits        int
+	timeoutHttp     time.Duration
+	timeoutDownload time.Duration
+	chunks          []chunk
+	done            chan int
+	mutex           sync.Mutex
 }
 
 const torBlock = 8000 // the longest plain text block in Tor
 
-func NewState(circuits int) *State {
+func NewState(circuits int, timeoutHttp int, timeoutDownload int) *State {
 	var s State
 	s.circuits = circuits
+	s.timeoutHttp = time.Duration(timeoutHttp) * time.Second
+	s.timeoutDownload = time.Duration(timeoutDownload) * time.Second
 	s.chunks = make([]chunk, s.circuits)
 	s.done = make(chan int)
 	return &s
@@ -70,7 +74,7 @@ func (s *State) fetchChunk(id int) {
 
 	// make an HTTP request in a new circuit
 	ctx, cancel := context.WithCancel(context.TODO())
-	timer := time.AfterFunc(10*time.Second, func() {
+	timer := time.AfterFunc(s.timeoutHttp, func() {
 		cancel()
 	})
 	defer func() {
@@ -95,7 +99,7 @@ func (s *State) fetchChunk(id int) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		fmt.Println("No response body")
+		fmt.Println("Unexpected HTTP status:", resp.StatusCode)
 		return
 	}
 
@@ -116,9 +120,10 @@ func (s *State) fetchChunk(id int) {
 	buffer := make([]byte, torBlock)
 	for {
 		if !timer.Stop() { // cancel() already started
+			fmt.Println("Downloading: timeout")
 			return
 		}
-		timer.Reset(3 * time.Second)
+		timer.Reset(s.timeoutDownload)
 		n, err := resp.Body.Read(buffer)
 		// fmt.Println("writing", id, n)
 		if n > 0 {
@@ -278,13 +283,15 @@ func (s *State) Fetch(src string) int {
 }
 
 func main() {
-	circuits := flag.Int("c", 20, "concurrent circuits")
+	circuits := flag.Int("circuits", 20, "concurrent circuits")
+	timeoutHttp := flag.Int("http-timeout", 10, "HTTP timeout (seconds)")
+	timeoutDownload := flag.Int("download-timeout", 5, "download timeout (seconds)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "torget 1.0, a fast large file downloader over locally installed Tor")
 		fmt.Fprintln(os.Stderr, "Copyright © 2021 Michał Trojnara <Michal.Trojnara@stunnel.org>")
 		fmt.Fprintln(os.Stderr, "Licensed under GNU/GPL version 3")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "Usage: torget [-c circuits] url")
+		fmt.Fprintln(os.Stderr, "Usage: torget [FLAGS] URL")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -292,7 +299,7 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	state := NewState(*circuits)
+	state := NewState(*circuits, *timeoutHttp, *timeoutDownload)
 	os.Exit(state.Fetch(flag.Arg(0)))
 }
 

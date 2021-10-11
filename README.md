@@ -6,9 +6,13 @@
     Copyright © 2021 Michał Trojnara <Michal.Trojnara@stunnel.org>
     Licensed under GNU/GPL version 3
     
-    Usage: torget [-c circuits] url
-      -c int
+    Usage: torget [FLAGS] URL
+      -circuits int
             concurrent circuits (default 20)
+      -download-timeout int
+            download timeout (seconds) (default 5)
+      -http-timeout int
+            HTTP timeout (seconds) (default 10)
     $ ./torget https://ftp.nluug.nl/os/Linux/distr/tails/tails/stable/tails-amd64-4.23/tails-amd64-4.23.img
     Output file: tails-amd64-4.23.img
     Download length: 1185939456 bytes
