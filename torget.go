@@ -2,7 +2,7 @@ package main
 
 /*
 	torget 1.0, a fast large file downloader over locally installed Tor
-	Copyright © 2021 Michał Trojnara <Michal.Trojnara@stunnel.org>
+	Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@ type State struct {
 	timeoutDownload time.Duration
 	chunks          []chunk
 	done            chan int
-	mutex           sync.Mutex
+	rwmutex         sync.RWMutex
 }
 
 const torBlock = 8000 // the longest plain text block in Tor
@@ -64,10 +64,10 @@ func (s *State) fetchChunk(id int) {
 	defer func() {
 		s.done <- id
 	}()
-	s.mutex.Lock()
+	s.rwmutex.RLock()
 	start := s.chunks[id].start
 	length := s.chunks[id].length
-	s.mutex.Unlock()
+	s.rwmutex.RUnlock()
 	if length == 0 {
 		return
 	}
@@ -128,14 +128,15 @@ func (s *State) fetchChunk(id int) {
 		// fmt.Println("writing", id, n)
 		if n > 0 {
 			file.Write(buffer[:n])
-			s.mutex.Lock()
+			// enough to RLock(), as we only modify our own chunk
+			s.rwmutex.RLock()
 			if int64(n) < s.chunks[id].length {
 				s.chunks[id].start += int64(n)
 				s.chunks[id].length -= int64(n)
 			} else {
 				s.chunks[id].length = 0
 			}
-			s.mutex.Unlock()
+			s.rwmutex.RUnlock()
 			if s.chunks[id].length == 0 {
 				break
 			}
@@ -152,11 +153,11 @@ func (s *State) progress() {
 	for {
 		time.Sleep(time.Second)
 		curr := s.total
-		s.mutex.Lock()
+		s.rwmutex.RLock()
 		for id := 0; id < s.circuits; id++ {
 			curr -= s.chunks[id].length
 		}
-		s.mutex.Unlock()
+		s.rwmutex.RUnlock()
 		if curr == prev {
 			fmt.Printf("%6.2f%% done, stalled\n",
 				100*float32(curr)/float32(s.total))
@@ -256,13 +257,13 @@ func (s *State) Fetch(src string) int {
 			// fmt.Println("resume", s.chunks[id].length)
 		} else { // completed
 			longest := 0
-			s.mutex.Lock()
+			s.rwmutex.RLock()
 			for i := 1; i < s.circuits; i++ {
 				if s.chunks[i].length > s.chunks[longest].length {
 					longest = i
 				}
 			}
-			s.mutex.Unlock()
+			s.rwmutex.RUnlock()
 			// fmt.Println("completed", s.chunks[longest].length)
 			if s.chunks[longest].length == 0 { // all done
 				break
@@ -271,11 +272,11 @@ func (s *State) Fetch(src string) int {
 				continue
 			}
 			// this circuit is faster, so we split 80%/20%
-			s.mutex.Lock()
+			s.rwmutex.Lock()
 			s.chunks[id].length = s.chunks[longest].length * 4 / 5
 			s.chunks[longest].length -= s.chunks[id].length
 			s.chunks[id].start = s.chunks[longest].start + s.chunks[longest].length
-			s.mutex.Unlock()
+			s.rwmutex.Unlock()
 		}
 		go s.fetchChunk(id)
 	}
@@ -287,8 +288,8 @@ func main() {
 	timeoutHttp := flag.Int("http-timeout", 10, "HTTP timeout (seconds)")
 	timeoutDownload := flag.Int("download-timeout", 5, "download timeout (seconds)")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "torget 1.0, a fast large file downloader over locally installed Tor")
-		fmt.Fprintln(os.Stderr, "Copyright © 2021 Michał Trojnara <Michal.Trojnara@stunnel.org>")
+		fmt.Fprintln(os.Stderr, "torget 1.1, a fast large file downloader over locally installed Tor")
+		fmt.Fprintln(os.Stderr, "Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>")
 		fmt.Fprintln(os.Stderr, "Licensed under GNU/GPL version 3")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Usage: torget [FLAGS] URL")
