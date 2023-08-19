@@ -125,7 +125,6 @@ func (s *State) fetchChunk(id int) {
 		}
 		timer.Reset(s.timeoutDownload)
 		n, err := resp.Body.Read(buffer)
-		// fmt.Println("writing", id, n)
 		if n > 0 {
 			file.Write(buffer[:n])
 			// enough to RLock(), as we only modify our own chunk
@@ -254,7 +253,6 @@ func (s *State) Fetch(src string) int {
 			// resume in a new and hopefully faster circuit
 			s.chunks[id].circuit = seq
 			seq++
-			// fmt.Println("resume", s.chunks[id].length)
 		} else { // completed
 			longest := 0
 			s.rwmutex.RLock()
@@ -264,7 +262,6 @@ func (s *State) Fetch(src string) int {
 				}
 			}
 			s.rwmutex.RUnlock()
-			// fmt.Println("completed", s.chunks[longest].length)
 			if s.chunks[longest].length == 0 { // all done
 				break
 			}
