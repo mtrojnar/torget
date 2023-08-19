@@ -60,6 +60,13 @@ func NewState(circuits int, timeoutHttp int, timeoutDownload int) *State {
 	return &s
 }
 
+func httpClient(user string) *http.Client {
+	proxyUrl, _ := url.Parse("socks5://" + user + ":" + user + "@127.0.0.1:9050/")
+	return &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)},
+	}
+}
+
 func (s *State) fetchChunk(id int) {
 	defer func() {
 		s.done <- id
@@ -82,9 +89,7 @@ func (s *State) fetchChunk(id int) {
 			cancel() // make sure cancel() is executed exactly once
 		}
 	}()
-	user := fmt.Sprintf("tg%d", s.chunks[id].circuit)
-	proxyUrl, _ := url.Parse("socks5://" + user + ":" + user + "@127.0.0.1:9050/")
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)}}
+	client := httpClient(fmt.Sprintf("tg%d", s.chunks[id].circuit))
 	req, _ := http.NewRequestWithContext(ctx, "GET", s.src, nil)
 	header := fmt.Sprintf("bytes=%d-%d", start, start+length-1)
 	req.Header.Add("Range", header)
@@ -202,8 +207,7 @@ func (s *State) Fetch(src string) int {
 	fmt.Println("Output file:", s.dst)
 
 	// get the target length
-	proxyUrl, _ := url.Parse("socks5://torget:torget@127.0.0.1:9050/")
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)}}
+	client := httpClient("torget")
 	resp, err := client.Head(s.src)
 	if err != nil {
 		fmt.Println(err.Error())
