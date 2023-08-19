@@ -1,11 +1,11 @@
 # torget
 
-    $ go build
+    $ go build torget.go
     $ ./torget -h
     torget 1.0, a fast large file downloader over locally installed Tor
     Copyright © 2021 Michał Trojnara <Michal.Trojnara@stunnel.org>
     Licensed under GNU/GPL version 3
-    
+
     Usage: torget [FLAGS] URL
       -circuits int
             concurrent circuits (default 20)
