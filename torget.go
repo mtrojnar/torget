@@ -49,10 +49,18 @@ type State struct {
 	chunks          []chunk
 	done            chan int
 	log             chan string
+	terminal        bool
 	rwmutex         sync.RWMutex
 }
 
 const torBlock = 8000 // the longest plain text block in Tor
+
+func httpClient(user string) *http.Client {
+	proxyUrl, _ := url.Parse("socks5://" + user + ":" + user + "@127.0.0.1:9050/")
+	return &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)},
+	}
+}
 
 func NewState(circuits int, timeoutHttp int, timeoutDownload int, verbose bool) *State {
 	var s State
@@ -63,13 +71,22 @@ func NewState(circuits int, timeoutHttp int, timeoutDownload int, verbose bool) 
 	s.chunks = make([]chunk, s.circuits)
 	s.done = make(chan int)
 	s.log = make(chan string, 10)
+	st, _ := os.Stdout.Stat()
+	s.terminal = st.Mode()&os.ModeCharDevice == os.ModeCharDevice
 	return &s
 }
 
-func httpClient(user string) *http.Client {
-	proxyUrl, _ := url.Parse("socks5://" + user + ":" + user + "@127.0.0.1:9050/")
-	return &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)},
+func (s *State) printPermanent(txt string) {
+	if s.terminal {
+		fmt.Printf("\r%-40s\n", txt)
+	} else {
+		fmt.Println(txt)
+	}
+}
+
+func (s *State) printTemporary(txt string) {
+	if s.terminal {
+		fmt.Printf("\r%-40s", txt)
 	}
 }
 
@@ -176,7 +193,7 @@ func (s *State) printLogs() {
 				if cnt > 1 {
 					prevLog = fmt.Sprintf("%s (%d times)", prevLog, cnt)
 				}
-				fmt.Printf("\r%-40s\n", prevLog)
+				s.printPermanent(prevLog)
 			}
 			prevLog = log
 			cnt = 1
@@ -233,7 +250,7 @@ func (s *State) progress() {
 		} else {
 			s.ignoreLogs()
 		}
-		fmt.Printf("\r%-40s", s.statusLine())
+		s.printTemporary(s.statusLine())
 	}
 }
 
@@ -332,6 +349,7 @@ func (s *State) Fetch(src string) int {
 		}
 		go s.fetchChunk(id)
 	}
+	s.printPermanent("Download complete")
 	return 0
 }
 
