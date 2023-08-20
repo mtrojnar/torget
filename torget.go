@@ -45,6 +45,7 @@ type State struct {
 	circuits        int
 	timeoutHttp     time.Duration
 	timeoutDownload time.Duration
+	verbose         bool
 	chunks          []chunk
 	done            chan int
 	log             chan string
@@ -53,11 +54,12 @@ type State struct {
 
 const torBlock = 8000 // the longest plain text block in Tor
 
-func NewState(circuits int, timeoutHttp int, timeoutDownload int) *State {
+func NewState(circuits int, timeoutHttp int, timeoutDownload int, verbose bool) *State {
 	var s State
 	s.circuits = circuits
 	s.timeoutHttp = time.Duration(timeoutHttp) * time.Second
 	s.timeoutDownload = time.Duration(timeoutDownload) * time.Second
+	s.verbose = verbose
 	s.chunks = make([]chunk, s.circuits)
 	s.done = make(chan int)
 	s.log = make(chan string, 10)
@@ -182,6 +184,12 @@ func (s *State) printLogs() {
 	}
 }
 
+func (s *State) ignoreLogs() {
+	for len(s.log) > 0 {
+		<-s.log
+	}
+}
+
 func (s *State) statusLine() string {
 	// calculate bytes transferred since the previous invocation
 	curr := s.bytesTotal
@@ -220,7 +228,11 @@ func (s *State) statusLine() string {
 func (s *State) progress() {
 	for {
 		time.Sleep(time.Second)
-		s.printLogs()
+		if s.verbose {
+			s.printLogs()
+		} else {
+			s.ignoreLogs()
+		}
 		fmt.Printf("\r%-40s", s.statusLine())
 	}
 }
@@ -327,6 +339,7 @@ func main() {
 	circuits := flag.Int("circuits", 20, "concurrent circuits")
 	timeoutHttp := flag.Int("http-timeout", 10, "HTTP timeout (seconds)")
 	timeoutDownload := flag.Int("download-timeout", 5, "download timeout (seconds)")
+	verbose := flag.Bool("verbose", false, "diagnostic details")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "torget 1.1, a fast large file downloader over locally installed Tor")
 		fmt.Fprintln(os.Stderr, "Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>")
@@ -340,7 +353,7 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	state := NewState(*circuits, *timeoutHttp, *timeoutDownload)
+	state := NewState(*circuits, *timeoutHttp, *timeoutDownload, *verbose)
 	os.Exit(state.Fetch(flag.Arg(0)))
 }
 
