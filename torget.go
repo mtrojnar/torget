@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,12 +40,14 @@ type chunk struct {
 type State struct {
 	src             string
 	dst             string
-	total           int64
+	bytesTotal      int64
+	bytesPrev       int64
 	circuits        int
 	timeoutHttp     time.Duration
 	timeoutDownload time.Duration
 	chunks          []chunk
 	done            chan int
+	log             chan string
 	rwmutex         sync.RWMutex
 }
 
@@ -57,6 +60,7 @@ func NewState(circuits int, timeoutHttp int, timeoutDownload int) *State {
 	s.timeoutDownload = time.Duration(timeoutDownload) * time.Second
 	s.chunks = make([]chunk, s.circuits)
 	s.done = make(chan int)
+	s.log = make(chan string, 10)
 	return &s
 }
 
@@ -95,16 +99,16 @@ func (s *State) fetchChunk(id int) {
 	req.Header.Add("Range", header)
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err.Error())
+		s.log <- fmt.Sprintf("Client Do: %s", err.Error())
 		return
 	}
 	if resp.Body == nil {
-		fmt.Println("No response body")
+		s.log <- "Client Do: No response body"
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		fmt.Println("Unexpected HTTP status:", resp.StatusCode)
+		s.log <- fmt.Sprintf("Client Do: Unexpected HTTP status: %d", resp.StatusCode)
 		return
 	}
 
@@ -112,12 +116,12 @@ func (s *State) fetchChunk(id int) {
 	file, err := os.OpenFile(s.dst, os.O_WRONLY, 0)
 	defer file.Close()
 	if err != nil {
-		fmt.Println(err.Error())
+		s.log <- fmt.Sprintf("os OpenFile: %s", err.Error())
 		return
 	}
 	_, err = file.Seek(start, io.SeekStart)
 	if err != nil {
-		fmt.Println(err.Error())
+		s.log <- fmt.Sprintf("File Seek: %s", err.Error())
 		return
 	}
 
@@ -125,7 +129,7 @@ func (s *State) fetchChunk(id int) {
 	buffer := make([]byte, torBlock)
 	for {
 		if !timer.Stop() { // cancel() already started
-			fmt.Println("Downloading: timeout")
+			s.log <- "Timer Stop: timeout"
 			return
 		}
 		timer.Reset(s.timeoutDownload)
@@ -146,43 +150,78 @@ func (s *State) fetchChunk(id int) {
 			}
 		}
 		if err != nil {
-			fmt.Println("Downloading:", err.Error())
+			s.log <- fmt.Sprintf("ReadCloser Read: %s", err.Error())
 			break
 		}
 	}
 }
 
+func (s *State) printLogs() {
+	n := len(s.log)
+	logs := make([]string, n+1)
+	for i := 0; i < n; i++ {
+		logs[i] = <-s.log
+	}
+	logs[n] = "stop" // not an expected log line
+	sort.Strings(logs)
+	prevLog := "start" // not an expected log line
+	cnt := 0
+	for _, log := range logs {
+		if log == prevLog {
+			cnt++
+		} else {
+			if cnt > 0 {
+				if cnt > 1 {
+					prevLog = fmt.Sprintf("%s (%d times)", prevLog, cnt)
+				}
+				fmt.Printf("\r%-40s\n", prevLog)
+			}
+			prevLog = log
+			cnt = 1
+		}
+	}
+}
+
+func (s *State) statusLine() string {
+	// calculate bytes transferred since the previous invocation
+	curr := s.bytesTotal
+	s.rwmutex.RLock()
+	for id := 0; id < s.circuits; id++ {
+		curr -= s.chunks[id].length
+	}
+	s.rwmutex.RUnlock()
+
+	var status string
+	if curr == s.bytesPrev {
+		status = fmt.Sprintf("%6.2f%% done, stalled",
+			100*float32(curr)/float32(s.bytesTotal))
+	} else {
+		speed := float32(curr-s.bytesPrev) / 1000
+		prefix := "K"
+		if speed >= 1000 {
+			speed /= 1000
+			prefix = "M"
+		}
+		if speed >= 1000 {
+			speed /= 1000
+			prefix = "G"
+		}
+		seconds := (s.bytesTotal - curr) / (curr - s.bytesPrev)
+		status = fmt.Sprintf("%6.2f%% done, %6.2f %sB/s, ETA %d:%02d:%02d",
+			100*float32(curr)/float32(s.bytesTotal),
+			speed, prefix,
+			seconds/3600, seconds/60%60, seconds%60)
+	}
+
+	s.bytesPrev = curr
+	return status
+}
+
 func (s *State) progress() {
-	var prev int64
 	for {
 		time.Sleep(time.Second)
-		curr := s.total
-		s.rwmutex.RLock()
-		for id := 0; id < s.circuits; id++ {
-			curr -= s.chunks[id].length
-		}
-		s.rwmutex.RUnlock()
-		if curr == prev {
-			fmt.Printf("%6.2f%% done, stalled\n",
-				100*float32(curr)/float32(s.total))
-		} else {
-			speed := float32(curr-prev) / 1000
-			prefix := "K"
-			if speed >= 1000 {
-				speed /= 1000
-				prefix = "M"
-			}
-			if speed >= 1000 {
-				speed /= 1000
-				prefix = "G"
-			}
-			seconds := (s.total - curr) / (curr - prev)
-			fmt.Printf("%6.2f%% done, %6.2f %sB/s, ETA %d:%02d:%02d\n",
-				100*float32(curr)/float32(s.total),
-				speed, prefix,
-				seconds/3600, seconds/60%60, seconds%60)
-		}
-		prev = curr
+		s.printLogs()
+		fmt.Printf("\r%-40s", s.statusLine())
 	}
 }
 
@@ -213,12 +252,12 @@ func (s *State) Fetch(src string) int {
 		fmt.Println(err.Error())
 		return 1
 	}
-	s.total = resp.ContentLength
-	if s.total <= 0 {
+	if resp.ContentLength <= 0 {
 		fmt.Println("Failed to retrieve download length")
 		return 1
 	}
-	fmt.Println("Download length:", s.total, "bytes")
+	s.bytesTotal = resp.ContentLength
+	fmt.Println("Download length:", s.bytesTotal, "bytes")
 
 	// create the output file
 	file, err := os.Create(s.dst)
@@ -231,7 +270,7 @@ func (s *State) Fetch(src string) int {
 	}
 
 	// initialize chunks
-	chunkLen := s.total / int64(s.circuits)
+	chunkLen := s.bytesTotal / int64(s.circuits)
 	seq := 0
 	for id := 0; id < s.circuits; id++ {
 		s.chunks[id].start = int64(id) * chunkLen
@@ -239,7 +278,7 @@ func (s *State) Fetch(src string) int {
 		s.chunks[id].circuit = seq
 		seq++
 	}
-	s.chunks[s.circuits-1].length += s.total % int64(s.circuits)
+	s.chunks[s.circuits-1].length += s.bytesTotal % int64(s.circuits)
 
 	// spawn initial fetchers
 	go s.progress()
