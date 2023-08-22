@@ -1,6 +1,23 @@
 # torget
 
+## Description
+
+The tool downloads large files over a locally installed Tor client by
+aggressively discovering a pool of fast circuits and using them in parallel.
+With slow servers, this strategy bypasses per-IP traffic shaping, resulting in
+much faster downloads.
+
+Onion services are fully supported.
+
+## Building From Source
+
+    $ git clone https://github.com/mtrojnar/torget.git
+    [...]
+    $ cd torget
     $ go build torget.go
+
+## Using
+
     $ ./torget -h
     torget 1.1, a fast large file downloader over locally installed Tor
     Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>
