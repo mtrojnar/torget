@@ -1,7 +1,7 @@
 package main
 
 /*
-	torget 1.0, a fast large file downloader over locally installed Tor
+	torget is a fast large file downloader over locally installed Tor
 	Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>
 
 	This program is free software: you can redistribute it and/or modify
