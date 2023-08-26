@@ -35,22 +35,25 @@ type chunk struct {
 	start   int64
 	length  int64
 	circuit int
+	bytes   int64
+	since   time.Time
+	cancel  context.CancelFunc
 }
 
 type State struct {
-	src             string
-	dst             string
-	bytesTotal      int64
-	bytesPrev       int64
-	circuits        int
-	timeoutHttp     time.Duration
-	timeoutDownload time.Duration
-	verbose         bool
-	chunks          []chunk
-	done            chan int
-	log             chan string
-	terminal        bool
-	rwmutex         sync.RWMutex
+	ctx         context.Context
+	src         string
+	dst         string
+	bytesTotal  int64
+	bytesPrev   int64
+	circuits    int
+	minLifetime time.Duration
+	verbose     bool
+	chunks      []chunk
+	done        chan int
+	log         chan string
+	terminal    bool
+	rwmutex     sync.RWMutex
 }
 
 const torBlock = 8000 // the longest plain text block in Tor
@@ -62,13 +65,13 @@ func httpClient(user string) *http.Client {
 	}
 }
 
-func NewState(circuits int, timeoutHttp int, timeoutDownload int, verbose bool) *State {
+func NewState(ctx context.Context, circuits int, minLifetime int, verbose bool) *State {
 	var s State
 	s.circuits = circuits
-	s.timeoutHttp = time.Duration(timeoutHttp) * time.Second
-	s.timeoutDownload = time.Duration(timeoutDownload) * time.Second
+	s.minLifetime = time.Duration(minLifetime) * time.Second
 	s.verbose = verbose
 	s.chunks = make([]chunk, s.circuits)
+	s.ctx = ctx
 	s.done = make(chan int)
 	s.log = make(chan string, 10)
 	st, _ := os.Stdout.Stat()
@@ -90,32 +93,22 @@ func (s *State) printTemporary(txt string) {
 	}
 }
 
-func (s *State) fetchChunk(id int) {
+func (s *State) chunkInit(id int) (client *http.Client, req *http.Request) {
+	s.chunks[id].bytes = 0
+	s.chunks[id].since = time.Now()
+	ctx, cancel := context.WithCancel(s.ctx)
+	s.chunks[id].cancel = cancel
+	client = httpClient(fmt.Sprintf("tg%d", s.chunks[id].circuit))
+	req, _ = http.NewRequestWithContext(ctx, "GET", s.src, nil)
+	req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d",
+		s.chunks[id].start, s.chunks[id].start+s.chunks[id].length-1))
+	return
+}
+
+func (s *State) chunkFetch(id int, client *http.Client, req *http.Request) {
 	defer func() {
 		s.done <- id
 	}()
-	s.rwmutex.RLock()
-	start := s.chunks[id].start
-	length := s.chunks[id].length
-	s.rwmutex.RUnlock()
-	if length == 0 {
-		return
-	}
-
-	// make an HTTP request in a new circuit
-	ctx, cancel := context.WithCancel(context.TODO())
-	timer := time.AfterFunc(s.timeoutHttp, func() {
-		cancel()
-	})
-	defer func() {
-		if timer.Stop() {
-			cancel() // make sure cancel() is executed exactly once
-		}
-	}()
-	client := httpClient(fmt.Sprintf("tg%d", s.chunks[id].circuit))
-	req, _ := http.NewRequestWithContext(ctx, "GET", s.src, nil)
-	header := fmt.Sprintf("bytes=%d-%d", start, start+length-1)
-	req.Header.Add("Range", header)
 	resp, err := client.Do(req)
 	if err != nil {
 		s.log <- fmt.Sprintf("Client Do: %s", err.Error())
@@ -138,7 +131,7 @@ func (s *State) fetchChunk(id int) {
 		s.log <- fmt.Sprintf("os OpenFile: %s", err.Error())
 		return
 	}
-	_, err = file.Seek(start, io.SeekStart)
+	_, err = file.Seek(s.chunks[id].start, io.SeekStart)
 	if err != nil {
 		s.log <- fmt.Sprintf("File Seek: %s", err.Error())
 		return
@@ -147,11 +140,6 @@ func (s *State) fetchChunk(id int) {
 	// copy network data to the output file
 	buffer := make([]byte, torBlock)
 	for {
-		if !timer.Stop() { // cancel() already started
-			s.log <- "Timer Stop: timeout"
-			return
-		}
-		timer.Reset(s.timeoutDownload)
 		n, err := resp.Body.Read(buffer)
 		if n > 0 {
 			file.Write(buffer[:n])
@@ -160,6 +148,7 @@ func (s *State) fetchChunk(id int) {
 			if int64(n) < s.chunks[id].length {
 				s.chunks[id].start += int64(n)
 				s.chunks[id].length -= int64(n)
+				s.chunks[id].bytes += int64(n)
 			} else {
 				s.chunks[id].length = 0
 			}
@@ -207,7 +196,7 @@ func (s *State) ignoreLogs() {
 	}
 }
 
-func (s *State) statusLine() string {
+func (s *State) statusLine() (status string) {
 	// calculate bytes transferred since the previous invocation
 	curr := s.bytesTotal
 	s.rwmutex.RLock()
@@ -216,7 +205,6 @@ func (s *State) statusLine() string {
 	}
 	s.rwmutex.RUnlock()
 
-	var status string
 	if curr == s.bytesPrev {
 		status = fmt.Sprintf("%6.2f%% done, stalled",
 			100*float32(curr)/float32(s.bytesTotal))
@@ -239,7 +227,7 @@ func (s *State) statusLine() string {
 	}
 
 	s.bytesPrev = curr
-	return status
+	return
 }
 
 func (s *State) progress() {
@@ -252,6 +240,36 @@ func (s *State) progress() {
 		}
 		s.printTemporary(s.statusLine())
 	}
+}
+
+func (s *State) darwin() { // kill the worst performing circuit
+	victim := -1
+	var slowest float64
+	now := time.Now()
+
+	s.rwmutex.RLock()
+	for id := 0; id < s.circuits; id++ {
+		if s.chunks[id].cancel == nil {
+			continue
+		}
+		eplased := now.Sub(s.chunks[id].since)
+		if eplased < s.minLifetime {
+			continue
+		}
+		throughput := float64(s.chunks[id].bytes) / eplased.Seconds()
+		if victim >= 0 && throughput >= slowest {
+			continue
+		}
+		victim = id
+		slowest = throughput
+	}
+	if victim >= 0 {
+		// fmt.Printf("killing %5.1fs %5.1fkB/s",
+		//	now.Sub(s.chunks[victim].since).Seconds(), slowest/1024.0)
+		s.chunks[victim].cancel()
+		s.chunks[victim].cancel = nil
+	}
+	s.rwmutex.RUnlock()
 }
 
 func (s *State) Fetch(src string) int {
@@ -313,53 +331,57 @@ func (s *State) Fetch(src string) int {
 	go s.progress()
 	go func() {
 		for id := 0; id < s.circuits; id++ {
-			go s.fetchChunk(id)
+			client, req := s.chunkInit(id)
+			go s.chunkFetch(id, client, req)
 			time.Sleep(499 * time.Millisecond) // be gentle to the local tor daemon
 		}
 	}()
 
 	// spawn additional fetchers as needed
 	for {
-		id := <-s.done
-		if s.chunks[id].length > 0 { // error
-			// resume in a new and hopefully faster circuit
-			s.chunks[id].circuit = seq
-			seq++
-		} else { // completed
-			longest := 0
-			s.rwmutex.RLock()
-			for i := 1; i < s.circuits; i++ {
-				if s.chunks[i].length > s.chunks[longest].length {
-					longest = i
+		select {
+		case id := <-s.done:
+			if s.chunks[id].length > 0 { // error
+				// resume in a new and hopefully faster circuit
+				s.chunks[id].circuit = seq
+				seq++
+			} else { // completed
+				longest := 0
+				s.rwmutex.RLock()
+				for i := 1; i < s.circuits; i++ {
+					if s.chunks[i].length > s.chunks[longest].length {
+						longest = i
+					}
 				}
+				s.rwmutex.RUnlock()
+				if s.chunks[longest].length == 0 { // all done
+					s.printPermanent("Download complete")
+					return 0
+				}
+				if s.chunks[longest].length <= 5*torBlock { // too short to split
+					continue
+				}
+				// this circuit is faster, so we split 80%/20%
+				s.rwmutex.Lock()
+				s.chunks[id].length = s.chunks[longest].length * 4 / 5
+				s.chunks[longest].length -= s.chunks[id].length
+				s.chunks[id].start = s.chunks[longest].start + s.chunks[longest].length
+				s.rwmutex.Unlock()
 			}
-			s.rwmutex.RUnlock()
-			if s.chunks[longest].length == 0 { // all done
-				break
-			}
-			if s.chunks[longest].length <= 5*torBlock { // too short to split
-				continue
-			}
-			// this circuit is faster, so we split 80%/20%
-			s.rwmutex.Lock()
-			s.chunks[id].length = s.chunks[longest].length * 4 / 5
-			s.chunks[longest].length -= s.chunks[id].length
-			s.chunks[id].start = s.chunks[longest].start + s.chunks[longest].length
-			s.rwmutex.Unlock()
+			client, req := s.chunkInit(id)
+			go s.chunkFetch(id, client, req)
+		case <-time.After(time.Second * 30):
+			s.darwin()
 		}
-		go s.fetchChunk(id)
 	}
-	s.printPermanent("Download complete")
-	return 0
 }
 
 func main() {
 	circuits := flag.Int("circuits", 20, "concurrent circuits")
-	timeoutHttp := flag.Int("http-timeout", 10, "HTTP timeout (seconds)")
-	timeoutDownload := flag.Int("download-timeout", 5, "download timeout (seconds)")
+	minLifetime := flag.Int("min-lifetime", 10, "minimum circuit lifetime (seconds)")
 	verbose := flag.Bool("verbose", false, "diagnostic details")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "torget 1.1, a fast large file downloader over locally installed Tor")
+		fmt.Fprintln(os.Stderr, "torget 2.0, a fast large file downloader over locally installed Tor")
 		fmt.Fprintln(os.Stderr, "Copyright © 2021-2023 Michał Trojnara <Michal.Trojnara@stunnel.org>")
 		fmt.Fprintln(os.Stderr, "Licensed under GNU/GPL version 3")
 		fmt.Fprintln(os.Stderr)
@@ -371,7 +393,9 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	state := NewState(*circuits, *timeoutHttp, *timeoutDownload, *verbose)
+	ctx := context.Background()
+	state := NewState(ctx, *circuits, *minLifetime, *verbose)
+	context.Background()
 	os.Exit(state.Fetch(flag.Arg(0)))
 }
 
