@@ -109,6 +109,14 @@ func (s *State) chunkFetch(id int, client *http.Client, req *http.Request) {
 	defer func() {
 		s.done <- id
 	}()
+
+	if s.verbose {
+		err := s.getExitNode(id, client)
+		if err != nil {
+			s.log <- fmt.Sprintf("getExitNode: %s", err.Error())
+		}
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		s.log <- fmt.Sprintf("Client Do: %s", err.Error())
@@ -162,6 +170,33 @@ func (s *State) chunkFetch(id int, client *http.Client, req *http.Request) {
 			break
 		}
 	}
+}
+
+func (s *State) getExitNode(id int, client *http.Client) error {
+	req, err := http.NewRequest(http.MethodGet, "https://check.torproject.org/api/ip", nil)
+	if err != nil {
+		return fmt.Errorf("http NewRequest: %s", err.Error())
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("client Do: %s", err.Error())
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("client Do: Unexpected HTTP status: %d", resp.StatusCode)
+	}
+	if resp.Body == nil {
+		return fmt.Errorf("client Do: No response body")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("io ReadAll: %s", err.Error())
+	}
+
+	s.log <- fmt.Sprintf("Circuit #%d: Exit node: %s", id, body)
+	return nil
 }
 
 func (s *State) printLogs() {
